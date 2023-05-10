@@ -1,0 +1,463 @@
+# update apt-get package installer
+sudo apt-get update -y && sudo apt-get upgrade -y
+sudo apt-get dist-upgrade -y && sudo apt autoremove -y
+
+# install required packages
+sudo apt-get install \
+apt-transport-https \
+ca-certificates \
+curl \
+gnupg \
+git \
+ufw \
+openssl \
+lsb-release
+
+
+#default ports used by the four Ethereum clients along with the firewall commands to allow traffic on those ports using UFW.
+#this assumes the node is sitting behind a network level firewall, only expose wanted services at the network level
+
+#Geth:
+#Port 30303 (TCP/UDP): used for communication between nodes on the Ethereum network.
+#Port 8545 (TCP): used for JSON-RPC API access, allow through network firewall if public facing RPC wanted
+
+sudo ufw allow 30303/tcp
+sudo ufw allow 30303/udp
+sudo ufw allow 8545/tcp
+
+
+#Erigon:
+#Port 8545 (TCP): used for JSON-RPC API access , allow through network firewall if public facing RPC wanted
+#Port 8546 (TCP): used for JSON-RPC over HTTPS access , allow through network firewall if public facing RPC wanted
+
+sudo ufw allow 8545/tcp
+sudo ufw allow 8546/tcp
+
+
+#Prysm:
+#Port 13000 (TCP/UDP): used for communication between nodes on the Ethereum network.
+#Port 12000 (TCP): used for gRPC API access.
+#Port 4000 (TCP): used for Beacon Node REST API access.
+
+sudo ufw allow 13000/tcp
+sudo ufw allow 13000/udp
+sudo ufw allow 12000/tcp
+sudo ufw allow 4000/tcp
+
+
+#Lighthouse:
+#Port 9000 (TCP/UDP): Becon node communitcations
+#Port 5052 (TCP/UDP): Validator node API access, allow through network firewall only if requried
+
+
+sudo ufw allow 9000/tcp
+sudo ufw allow 9000/udp
+sudo ufw allow 5052/tcp
+sudo ufw allow 5052/udp
+
+
+#To enable remote monitoring of your Ethereum client using Prometheus and Grafana.
+#Prometheus: Port 9090 (TCP): used for accessing the Prometheus web interface and API.
+#Grafana: Port 3000 (TCP): used for accessing the Grafana web interface.
+#Only expose via network firewall if required
+
+sudo ufw allow 9090/tcp
+sudo ufw allow 3000/tcp
+
+
+#remote access (internal network) for SSH and RDP, allow through network firewall only if requried
+sudo ufw allow 22/tcp
+sudo ufw allow 3389/tcp
+
+# note firewall will be disabled until you run this command: 
+sudo ufw enable
+
+# CHECK Firewall Settings
+
+# to show rules applied
+sudo ufw status numbered
+
+# to show firewall status: 
+sudo ufw status
+
+
+# When setting up your network rounters port forwarding use these settings
+
+# INBOUND
+# port 30303 both Geth UDP and TCP forwarding - execution node's listener port
+# port 12000 UDP - Pyrsm beacon node peer discovery
+# port 13000 TCP - Pyrsm ongoing peer communications
+# port 9000 TCP - Lighthouse ongoing peer communications
+
+# OUTBOUND
+# InternalNodeIP/any both UDP and TCP - allow your node to use random ports for communiction
+
+
+################# Node & Docker Configuration ####################
+
+
+# download and install docker
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+echo \
+"deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
+$(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt-get update -y
+
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose
+
+#create a docker network for container communications
+sudo docker network create --subnet=172.18.0.0/16 pulsechain
+
+#Setup New User Group
+sudo groupadd validator
+sudo usermod -aG validator YOURUSERNAME
+
+# create a directory for blockchain data and adjust permissions 
+mkdir /blockchain
+chmod 700 /blockchain
+cd /blockchain
+
+# make a directory for your Validators
+mkdir validators
+chmod 700 validators
+
+
+# generate an SSL certificate
+openssl rand -hex 32 | sudo tee /blockchain/jwt.hex > /dev/null
+
+############# EXECUTION CLIENT OPTIONS################
+#### GETH ####
+docker pull registry.gitlab.com/pulsechaincom/go-pulse:latest
+
+registry.gitlab.com/pulsechaincom/go-pulse:v2.0.0
+
+# docker for geth node
+sudo docker run -d \
+--restart unless-stopped \
+--network=pulsechain \
+--ip 172.18.0.2 \
+--name=execution \
+-p 8545:8545 \
+-p 30303:30303 \
+-p 30303:30303/udp \
+-p 6060:6060 \
+-v /blockchain:/blockchain \
+registry.gitlab.com/pulsechaincom/go-pulse \
+--pulsechain-testnet-v4 \
+--datadir=/blockchain/execution \
+--txlookuplimit 0 \
+--gpo.ignoreprice 1 \
+--authrpc.addr "0.0.0.0" \
+--authrpc.vhosts "*" \
+--authrpc.port 8551 \
+--authrpc.jwtsecret /blockchain/jwt.hex \
+--http \
+--http.addr 0.0.0.0 \
+--metrics \
+--metrics.addr 0.0.0.0 \
+--syncmode=snap 
+
+#### Erigon-Pulse ####
+docker pull registry.gitlab.com/pulsechaincom/erigon-pulse:latest
+
+sudo docker run \
+-d \
+--restart unless-stopped \
+--network=pulsechain \
+--ip 172.18.0.2 \
+--name=execution \
+-p 30303:30303 -p 30303:30303/udp \
+-p 30304:30304 -p 30304:30304/udp \
+-p 42069:42069 -p 42069:42069/udp \
+-v /blockchain:/blockchain \
+registry.gitlab.com/pulsechaincom/erigon-pulse \
+--chain=pulsechain-testnet-v4 \
+--datadir=/blockchain/execution \
+--externalcl \
+--authrpc.addr "0.0.0.0" \
+--authrpc.jwtsecret /blockchain/jwt.hex \
+--authrpc.vhosts "*" \
+--metrics.port 6060 \
+--metrics \
+--metrics.addr 172.18.0.2
+
+
+
+############# CONSENSUS CLIENT OPTIONS################
+#### prysm ####
+docker pull registry.gitlab.com/pulsechaincom/prysm-pulse/beacon-chain:latest
+
+sudo docker run -d \
+--network=pulsechain \
+--ip 172.18.0.3 \
+--restart unless-stopped \
+--name=consensus \
+-v /blockchain:/blockchain \
+-p 13000:13000/tcp \
+-p 12000:12000/udp \
+-p 4000:4000/tcp \
+registry.gitlab.com/pulsechaincom/prysm-pulse/beacon-chain \
+--pulsechain-testnet-v4 \
+--jwt-secret=/blockchain/jwt.hex \
+--datadir=/blockchain/consensus \
+--suggested-fee-recipient=YOUR_ETH_ADDRESS \
+--checkpoint-sync-url "https://checkpoint.v4.testnet.pulsechain.com" \
+--genesis-beacon-api-url "https://checkpoint.v4.testnet.pulsechain.com" \
+--grpc-gateway-host "0.0.0.0" \
+--rpc-host "0.0.0.0" \
+--execution-endpoint "http://172.18.0.2:8551" \
+--bootstrap-node=enr:-L64QNIt1R1_ou9Aw5ci8gLAsV1TrK2MtWiPNGy21YsTW0HpA86hGowakgk3IVEZNjBOTVdqtXObXyErbEfxEi8Y8Z-CARSHYXR0bmV0c4j__________4RldGgykFuckgYAAAlE__________-CaWSCdjSCaXCEA--2T4lzZWNwMjU2azGhArzEiK-HUz_pnQBn_F8g7sCRKLU4GUocVeq_TX6UlFXIiHN5bmNuZXRzD4N0Y3CCIyiDdWRwgiMo \
+--min-sync-peers 1 \
+--monitoring-host "0.0.0.0"
+
+ 
+#### lighthouse-Pulse ####
+docker pull registry.gitlab.com/pulsechaincom/lighthouse-pulse:latest
+
+sudo docker run -d \
+--network=pulsechain \
+--ip 172.18.0.3 \
+--restart unless-stopped \
+--name=consensus \
+-v /blockchain:/blockchain \
+-p 9000:9000/tcp \
+-p 9000:9000/udp \
+-p 8080:8080/tcp \
+registry.gitlab.com/pulsechaincom/lighthouse-pulse \
+lighthouse bn \
+--network=pulsechain_testnet_v4 \
+--execution-jwt=/blockchain/jwt.hex \
+--datadir=/blockchain/consensus \
+--disable-deposit-contract-sync \
+--validator-monitor-auto \
+--execution-endpoint=http://172.18.0.2:8551 \
+--checkpoint-sync-url https://checkpoint.v4.testnet.pulsechain.com \
+--http-address 0.0.0.0 \
+--http \
+--metrics-port 8080 \
+--metrics \
+--metrics-address 172.18.0.3 \
+--metrics-allow-origin "*"
+
+
+
+
+
+
+
+
+# download and install command line tool for staking
+git clone https://gitlab.com/pulsechaincom/staking-deposit-cli.git
+
+cd staking-deposit-cli
+
+# Install python and run desposit setup
+sudo apt install python3-pip
+
+sudo pip3 install -r requirements.txt
+
+sudo python3 setup.py install
+
+sudo ./deposit.sh install
+
+#BEFORE running below commands replace withdrawal address with one of your own
+sudo ./deposit.sh new-mnemonic --num_validators=10 --mnemonic_language=english --chain=pulsechain-testnet-v4 --folder=/blockchain/validators --eth1_withdrawal_address=YOUR_ETH_ADDRESS
+
+
+
+############# VALIDATOR CLIENT OPTIONS################
+#### prysm validator ####
+docker pull registry.gitlab.com/pulsechaincom/prysm-pulse/validator:latest
+
+sudo docker run \
+-it \
+--network=pulsechain \
+--ip 172.18.0.4 \
+--restart unless-stopped \
+--name=validator \
+-v /blockchain/validators:/wallet \
+registry.gitlab.com/pulsechaincom/prysm-pulse/validator:latest \
+--pulsechain-testnet-v4 \
+--suggested-fee-recipient=YOUR_ETH_ADDRESS \
+--wallet-dir /wallet \
+--beacon-rpc-gateway-provider "172.18.0.3:3500" \
+--beacon-rpc-provider "172.18.0.3:4000" \
+--grpc-gateway-host "0.0.0.0" \
+--rpc \
+--rpc-host "0.0.0.0" \
+--graffiti "bk-val001" \
+--monitoring-host "0.0.0.0"
+
+
+#### Lighthouse-Pulse Validator ####
+docker pull registry.gitlab.com/pulsechaincom/lighthouse-pulse:latest
+
+sudo docker run \
+-it \
+--network=pulsechain \
+--ip 172.18.0.4 \
+--restart unless-stopped \
+--name=validator \
+-v /blockchain/validators:/wallet \
+registry.gitlab.com/pulsechaincom/lighthouse-pulse:latest \
+lighthouse vc \
+--network=pulsechain_testnet_v4 \
+--http-address "0.0.0.0" \
+--http \
+--unencrypted-http-transport \
+--http-allow-origin "*" \
+--beacon-nodes "http://172.18.0.3:5052" \
+--graffiti "bk-val001" \
+--suggested-fee-recipient=YOUR_ETH_ADDRESS \
+--validators-dir /wallet \
+--metrics \
+--metrics-port 8081 \
+--metrics-address 172.18.0.4
+
+
+
+
+importing validator account to lighthouse
+sudo docker run -it --network=pulsechain -v /blockchain:/blockchain registry.gitlab.com/pulsechaincom/lighthouse-pulse lighthouse --network pulsechain_testnet_v4 account validator import --directory /blockchain/validators/validator_keys --datadir=/wallet/
+
+
+
+
+
+
+
+
+# Controlling Your Nodes
+sudo docker logs --follow execution
+
+sudo docker logs --follow consensus
+
+sudo docker logs --follow validator
+
+#graceful shutdown commands
+sudo docker stop -t 300 execution
+sudo docker stop -t 100 consensus
+sudo docker stop -t 100 validator
+
+
+##### EXIT A VALIDATOR (Lighthouse) ####
+#reference document: https://lighthouse-book.sigmaprime.io/voluntary-exit.html
+sudo docker exec -it validator lighthouse --network pulsechain_testnet_v4 account validator exit --keystore /wallet/validator_keys/keystore-m_XXXXXXXXXXXXXXXXX.json --beacon-node http://172.18.0.3:5052
+
+
+#Enter the exit phrase
+Exit my validator
+
+
+
+
+# MONITORING non-dockerised apporoach 
+# if interested in prometheus check out the below links for how to install and configure
+# https://www.coincashew.com/coins/overview-eth/guide-or-how-to-setup-a-validator-on-eth2-mainnet/part-i-installation/monitoring-your-validator-with-grafana-and-prometheus
+nano /etc/prometheus/prometheus.yml
+
+#Controlling your Monitoring service
+sudo systemctl restart grafana-server.service prometheus.service prometheus-node-exporter.service
+sudo systemctl status grafana-server.service prometheus.service prometheus-node-exporter.service
+
+# here is an example of a working prometheus.yml config which refereneces the IP address assigned to the docker containters
+# prometheus.yml file example also in this repo
+----------------------------------------------------------------------------
+global:
+  scrape_interval:     15s # By default, scrape targets every 15 seconds.
+
+  # Attach these labels to any time series or alerts when communicating with
+  # external systems (federation, remote storage, Alertmanager).
+  external_labels:
+    monitor: 'codelab-monitor'
+
+# A scrape configuration containing exactly one endpoint to scrape:
+# Here it's Prometheus itself.
+scrape_configs:
+   - job_name: 'node_exporter'
+     static_configs:
+       - targets: ['localhost:9100']
+   - job_name: 'validator'
+     static_configs:
+       - targets: ['172.18.0.4:8081']
+   - job_name: 'beacon node'
+     static_configs:
+       - targets: ['172.18.0.3:8080']
+   - job_name: 'slasher'
+     static_configs:
+       - targets: ['172.18.0.3:8082']
+   - job_name: 'geth'
+     scrape_interval: 15s
+     scrape_timeout: 10s
+     metrics_path: /debug/metrics/prometheus
+     scheme: http
+     static_configs:
+       - targets: ['172.18.0.2:6060']
+-------------------------------------------------------------------------
+
+
+
+# getting secure remote access via SSH, only use if you know what you are doing
+# ssh -i key.pem -N ubuntu@validator-server-IP -L 8080:localhost:3000
+# then you open http://localhost:8080 to access grafana on your local machine
+
+
+# remote desktop setup
+#Install RDP client on unbuntu
+# https://www.digitalocean.com/community/tutorials/how-to-enable-remote-desktop-protocol-using-xrdp-on-ubuntu-22-04
+# https://www.makeuseof.com/tag/ubuntu-remote-desktop-builtin-vnc-compatible-dead-easy/
+# in the gui make sure you set the password correctly as the default password is not the user accounts password
+
+sudo apt install xrdp
+sudo systemctl enable xrdp
+sudo ufw allow 3389
+
+#restart script
+
+#stop script
+#! bin/bash/stop.sh
+sudo docker stop -t 300 execution
+sudo docker stop -t 100 consensus
+sudo docker stop -t 100 validator
+sudo docker rm execution
+sudo docker rm consensus
+sudo docker rm validator
+echo "stop sequence complete"
+
+trouble shooting
+sudo docker exec -it execution geth attach http://localhost:8545
+
+
+#updating all clients
+sudo docker pull registry.gitlab.com/pulsechaincom/go-pulse:latest
+sudo docker pull registry.gitlab.com/pulsechaincom/erigon-pulse:latest
+sudo docker pull registry.gitlab.com/pulsechaincom/prysm-pulse/beacon-chain:latest
+sudo docker pull registry.gitlab.com/pulsechaincom/lighthouse-pulse:latest
+sudo docker pull registry.gitlab.com/pulsechaincom/prysm-pulse/validator:latest
+
+
+
+
+
+
+#Queries 
+
+curl -X GET "https://172.18.0.3:5052/health" -H  "accept: application/json"
+curl -X POST "http://172.18.0.3:5052/lighthouse/ui/validator_metrics" -d '{"indices": [12345]}' -H "Content-Type: application/json" | jq
+curl -X GET "http://172.18.0.3:5052/lighthouse/eth1/deposit_cache" -H  "accept: application/json" | jq
+curl -X GET "http://172.18.0.3:5052/lighthouse/health" -H  "accept: application/json" | jq
+
+
+
+
+#NODE EXIT COMMAND
+
+sudo docker exec -it validator lighthouse --network pulsechain_testnet_v4 account validator exit --keystore /wallet/validator_keys/keystore-m_XXXXXXX_3600_0_0_0-1681968546.json --beacon-node http://172.18.0.3:5052
+
+
+
+
+
+
+
